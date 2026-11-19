@@ -1,0 +1,55 @@
+name: Testar otimizacao Champions 3D Web
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  testar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Instalar ferramentas de imagem
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y imagemagick webp
+
+      - name: Baixar quatro sprites do acervo H!P
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p originais otimizados/front otimizados/shiny otimizados/female otimizados/female-shiny
+          BASE="https://raw.githubusercontent.com/heypikachu/champions-3d/main"
+          curl -fLsS --retry 3 "$BASE/front/122.webp" -o originais/front.webp
+          curl -fLsS --retry 3 "$BASE/shiny/front/122.webp" -o originais/shiny.webp
+          curl -fLsS --retry 3 "$BASE/female/front/25.webp" -o originais/female.webp
+          curl -fLsS --retry 3 "$BASE/female/shiny/front/25.webp" -o originais/female-shiny.webp
+
+      - name: Otimizar WebP preservando quadros de animacao
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "| Versao | Original (KiB) | Otimizado (KiB) | Reducao | Quadros antes | Quadros depois |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---:|---:|---:|---:|---:|" >> "$GITHUB_STEP_SUMMARY"
+          for grupo in front shiny female female-shiny; do
+            source="originais/$grupo.webp"
+            target="otimizados/$grupo/$( [ "$grupo" = female ] || [ "$grupo" = female-shiny ] && echo 25 || echo 122 ).webp"
+            # Coalesce aplica corretamente os quadros parciais antes do redimensionamento.
+            convert "$source" -coalesce -resize '512x512>' -layers Optimize -quality 82 "$target"
+            before=$(identify "$source" | wc -l)
+            after=$(identify "$target" | wc -l)
+            test "$before" -eq "$after" || { echo "Perda de quadros em $grupo"; exit 1; }
+            orig=$(stat -c %s "$source")
+            opt=$(stat -c %s "$target")
+            pct=$(awk -v a="$orig" -v b="$opt" 'BEGIN { printf "%.1f",100*(1-b/a) }')
+            printf '| %s | %s | %s | %s%% | %s | %s |\n' "$grupo" "$((orig/1024))" "$((opt/1024))" "$pct" "$before" "$after" >> "$GITHUB_STEP_SUMMARY"
+          done
+
+      - name: Disponibilizar teste para conferencia visual
+        uses: actions/upload-artifact@v4
+        with:
+          name: champions-3d-web-teste-512px
+          path: otimizados/
+          retention-days: 7
