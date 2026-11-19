@@ -1,0 +1,142 @@
+name: Importar Champions 3D Web
+
+on:
+  workflow_dispatch:
+    inputs:
+      grupo:
+        description: "Categoria para importar e otimizar"
+        required: true
+        type: choice
+        options:
+          - front
+          - shiny
+          - female
+          - female-shiny
+
+permissions:
+  contents: write
+
+concurrency:
+  group: champions-3d-web
+  cancel-in-progress: false
+
+jobs:
+  importar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout do repositório web
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - name: Instalar ferramentas
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y imagemagick webp
+
+      - name: Definir origem e destino
+        shell: bash
+        env:
+          GRUPO: ${{ inputs.grupo }}
+        run: |
+          set -euo pipefail
+
+          case "$GRUPO" in
+            front)
+              SOURCE_PATH="front"
+              DEST_PATH="front"
+              ;;
+            shiny)
+              SOURCE_PATH="shiny/front"
+              DEST_PATH="shiny"
+              ;;
+            female)
+              SOURCE_PATH="female/front"
+              DEST_PATH="female"
+              ;;
+            female-shiny)
+              SOURCE_PATH="female/shiny/front"
+              DEST_PATH="female-shiny"
+              ;;
+            *)
+              echo "Grupo inválido"
+              exit 1
+              ;;
+          esac
+
+          echo "SOURCE_PATH=$SOURCE_PATH" >> "$GITHUB_ENV"
+          echo "DEST_PATH=$DEST_PATH" >> "$GITHUB_ENV"
+
+      - name: Clonar somente a pasta necessária do acervo original
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git clone --depth 1 --filter=blob:none --no-checkout \
+            --branch main https://github.com/heypikachu/champions-3d.git /tmp/champions-3d
+
+          cd /tmp/champions-3d
+          git sparse-checkout init --no-cone
+          printf '/%s/*.webp\n' "$SOURCE_PATH" > .git/info/sparse-checkout
+          git checkout main
+
+      - name: Otimizar sprites para web
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$GITHUB_WORKSPACE/$DEST_PATH"
+
+          echo "| Arquivo | Original (KiB) | Otimizado (KiB) | Redução | Quadros |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---:|---:|---:|---:|" >> "$GITHUB_STEP_SUMMARY"
+
+          count=0
+          for file in /tmp/champions-3d/"$SOURCE_PATH"/*.webp; do
+            [ -e "$file" ] || continue
+
+            name="$(basename "$file")"
+            out="$GITHUB_WORKSPACE/$DEST_PATH/$name"
+
+            convert "$file" -coalesce -resize '384x384>' -layers Optimize -quality 78 "$out"
+
+            before=$(identify "$file" | wc -l)
+            after=$(identify "$out" | wc -l)
+
+            if [ "$before" -ne "$after" ]; then
+              echo "Perda de quadros em $name"
+              exit 1
+            fi
+
+            orig=$(stat -c %s "$file")
+            opt=$(stat -c %s "$out")
+            pct=$(awk -v a="$orig" -v b="$opt" 'BEGIN { printf "%.1f",100*(1-b/a) }')
+
+            if [ "$count" -lt 20 ]; then
+              printf '| %s | %s | %s | %s%% | %s |\n' "$name" "$((orig/1024))" "$((opt/1024))" "$pct" "$before" >> "$GITHUB_STEP_SUMMARY"
+            fi
+
+            count=$((count+1))
+          done
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Total de arquivos processados:** $count" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Salvar em lotes no GitHub
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "H!P Bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add "$DEST_PATH"
+
+          if git diff --cached --quiet; then
+            echo "Nenhum arquivo novo para salvar."
+            exit 0
+          fi
+
+          git commit -m "Importar Champions 3D Web: $DEST_PATH"
+          git push
